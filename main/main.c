@@ -16,10 +16,11 @@
 static const char *TAG = "EEG_BOARD";
 
 #define ADS_SPI_HOST        SPI2_HOST
-#define ADS_SPI_FREQ_HZ     100000
+#define ADS_SPI_FREQ_HZ     1000000
 #define ADS_WORD_BYTES      3
 #define ADS_FRAME_WORDS     10
 #define ADS_FRAME_BYTES     (ADS_WORD_BYTES * ADS_FRAME_WORDS)
+#define ADS_REG_CLOCK       0x03
 
 #define ADS_REG_ID          0x00
 
@@ -207,6 +208,67 @@ static void ads_test_read_id(void)
     }
 }
 
+static uint16_t ads_make_wreg_command(uint8_t reg_addr, uint8_t reg_count)
+{
+    // WREG command format:
+    // 011a aaaa annn nnnn
+    // reg_count is actual count, so writing 1 register means nnn_nnnn = 0
+    return 0x6000 |
+           ((reg_addr & 0x3F) << 7) |
+           ((reg_count - 1) & 0x7F);
+}
+
+static void ads_write_single_register(uint8_t reg_addr, uint16_t value)
+{
+    uint8_t tx1[ADS_FRAME_BYTES] = {0};
+    uint8_t rx1[ADS_FRAME_BYTES] = {0};
+
+    uint8_t tx2[ADS_FRAME_BYTES] = {0};
+    uint8_t rx2[ADS_FRAME_BYTES] = {0};
+
+    uint16_t wreg_cmd = ads_make_wreg_command(reg_addr, 1);
+
+    // Command word in word 0, register data in word 1.
+    // Both are 16-bit values MSB-aligned in 24-bit ADS words.
+    ads_put_word24(tx1, 0, ((uint32_t)wreg_cmd) << 8);
+    ads_put_word24(tx1, 1, ((uint32_t)value) << 8);
+
+    ESP_LOGI(TAG, "Writing register 0x%02X = 0x%04X using WREG 0x%04X",
+             reg_addr, value, wreg_cmd);
+
+    // Frame 1: send WREG command + data
+    ads_transfer_frame(tx1, rx1);
+
+    // Frame 2: send NULL frame, receive WREG response/ack
+    ads_transfer_frame(tx2, rx2);
+
+    uint32_t ack_word24 = ads_rx_word24(rx2, 0);
+    uint16_t ack = (ack_word24 >> 8) & 0xFFFF;
+
+    ESP_LOGI(TAG, "WREG ack word24 = 0x%06lX", (unsigned long)ack_word24);
+    ESP_LOGI(TAG, "WREG ack = 0x%04X", ack);
+}
+
+static void ads_test_write_readback_clock(void)
+{
+    ESP_LOGI(TAG, "Testing CLOCK register write/readback");
+
+    uint16_t clock_before = ads_read_single_register(ADS_REG_CLOCK);
+    ESP_LOGI(TAG, "CLOCK before = 0x%04X", clock_before);
+
+    ads_write_single_register(ADS_REG_CLOCK, clock_before);
+
+    uint16_t clock_after = ads_read_single_register(ADS_REG_CLOCK);
+    ESP_LOGI(TAG, "CLOCK after  = 0x%04X", clock_after);
+
+    if (clock_after == clock_before) {
+        ESP_LOGI(TAG, "CLOCK write/readback OK");
+    } else {
+        ESP_LOGW(TAG, "CLOCK write/readback FAIL: before=0x%04X after=0x%04X",
+                 clock_before, clock_after);
+    }
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "Boot ok");
@@ -227,9 +289,11 @@ void app_main(void)
     ads_spi_init();
 
     ads_reset_pulse();
+    ads_test_read_id();
+    ads_test_write_readback_clock();
 
    while (1) {
-    ads_test_read_id();
+   
     ESP_LOGI(TAG, "Alive");
     vTaskDelay(pdMS_TO_TICKS(2000));
 }
