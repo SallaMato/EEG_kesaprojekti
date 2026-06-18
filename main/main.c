@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
+#include <stdbool.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -21,8 +23,9 @@ static const char *TAG = "EEG_BOARD";
 #define ADS_FRAME_WORDS     10
 #define ADS_FRAME_BYTES     (ADS_WORD_BYTES * ADS_FRAME_WORDS)
 #define ADS_REG_CLOCK       0x03
-
 #define ADS_REG_ID          0x00
+#define ADS_STREAM_DELAY_MS  20
+#define ADS_CH2_WORD_INDEX   3
 
 static spi_device_handle_t ads_spi = NULL;
 
@@ -269,6 +272,89 @@ static void ads_test_write_readback_clock(void)
     }
 }
 
+static int32_t ads_sign_extend_24(uint32_t word24)
+{
+    word24 &= 0xFFFFFF;
+
+    if (word24 & 0x800000) {
+        return (int32_t)(word24 | 0xFF000000);
+    }
+
+    return (int32_t)word24;
+}
+
+static bool ads_wait_drdy_low(uint32_t timeout_ms)
+{
+    TickType_t start = xTaskGetTickCount();
+
+    while (gpio_get_level(PIN_ADS_DRDY) != 0) {
+        if ((xTaskGetTickCount() - start) > pdMS_TO_TICKS(timeout_ms)) {
+            ESP_LOGW(TAG, "Timeout waiting for DRDY low");
+            return false;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    return true;
+}
+
+static bool ads_read_data_frame(uint32_t words[ADS_FRAME_WORDS])
+{
+    uint8_t tx[ADS_FRAME_BYTES] = {0};
+    uint8_t rx[ADS_FRAME_BYTES] = {0};
+
+    if (!ads_wait_drdy_low(1000)) {
+        return false;
+    }
+
+    ads_transfer_frame(tx, rx);
+
+    for (int i = 0; i < ADS_FRAME_WORDS; i++) {
+        words[i] = ads_rx_word24(rx, i);
+    }
+
+    return true;
+}
+
+static void ads_print_ch2_ch3_once(void)
+{
+    uint32_t words[ADS_FRAME_WORDS] = {0};
+
+    if (!ads_read_data_frame(words)) {
+        return;
+    }
+
+    int32_t ch2 = ads_sign_extend_24(words[3]);
+    int32_t ch3 = ads_sign_extend_24(words[4]);
+
+    ESP_LOGI(TAG,
+             "STATUS=0x%06lX  CH2=%ld  CH3=%ld  CRC=0x%06lX",
+             (unsigned long)words[0],
+             (long)ch2,
+             (long)ch3,
+             (unsigned long)words[9]);
+}
+
+static void ads_stream_ch2_csv(void)
+{
+    static uint32_t sample_index = 0;
+
+    uint32_t words[ADS_FRAME_WORDS] = {0};
+
+    if (!ads_read_data_frame(words)) {
+        return;
+    }
+
+    int32_t ch2 = ads_sign_extend_24(words[ADS_CH2_WORD_INDEX]);
+
+    printf("DATA,%lu,%ld\n",
+           (unsigned long)sample_index,
+           (long)ch2);
+
+    sample_index++;
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "Boot ok");
@@ -292,10 +378,12 @@ void app_main(void)
     ads_test_read_id();
     ads_test_write_readback_clock();
 
-   while (1) {
-   
-    ESP_LOGI(TAG, "Alive");
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    ESP_LOGI(TAG, "Starting CH2 CSV stream");
+    printf("HEADER,sample,ch2_raw\n");
+
+    while (1) {
+    ads_stream_ch2_csv();
+    vTaskDelay(pdMS_TO_TICKS(ADS_STREAM_DELAY_MS));
 }
 
 }
