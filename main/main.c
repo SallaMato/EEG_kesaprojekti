@@ -336,7 +336,7 @@ static void ads_print_ch2_ch3_once(void)
              (unsigned long)words[9]);
 }
 
-static void ads_stream_ch2_csv(void)
+static void ads_stream_ch2_ch3_csv(void)
 {
     static uint32_t sample_index = 0;
 
@@ -346,11 +346,13 @@ static void ads_stream_ch2_csv(void)
         return;
     }
 
-    int32_t ch2 = ads_sign_extend_24(words[ADS_CH2_WORD_INDEX]);
+    int32_t ch2 = ads_sign_extend_24(words[3]);  // AIN2P/AIN2N
+    int32_t ch3 = ads_sign_extend_24(words[4]);  // AIN3P/AIN3N
 
-    printf("DATA,%lu,%ld\n",
+    printf("DATA,%lu,%ld,%ld\n",
            (unsigned long)sample_index,
-           (long)ch2);
+           (long)ch2,
+           (long)ch3);
 
     sample_index++;
 }
@@ -378,11 +380,11 @@ void app_main(void)
     ads_test_read_id();
     ads_test_write_readback_clock();
 
-    ESP_LOGI(TAG, "Starting CH2 CSV stream");
-    printf("HEADER,sample,ch2_raw\n");
+ ESP_LOGI(TAG, "Starting CH2/CH3 CSV stream");
+printf("HEADER,sample,ch2_raw,ch3_raw\n");
 
-    while (1) {
-    ads_stream_ch2_csv();
+while (1) {
+    ads_stream_ch2_ch3_csv();
     vTaskDelay(pdMS_TO_TICKS(ADS_STREAM_DELAY_MS));
 }
 
