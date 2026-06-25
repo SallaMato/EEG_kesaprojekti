@@ -14,18 +14,38 @@
 
 #include "board_pins.h"
 #include "esp_rom_sys.h"
+#include "esp_timer.h"
 
 static const char *TAG = "EEG_BOARD";
 
 #define ADS_SPI_HOST        SPI2_HOST
 #define ADS_SPI_FREQ_HZ     1000000
+
 #define ADS_WORD_BYTES      3
 #define ADS_FRAME_WORDS     10
 #define ADS_FRAME_BYTES     (ADS_WORD_BYTES * ADS_FRAME_WORDS)
-#define ADS_REG_CLOCK       0x03
+
 #define ADS_REG_ID          0x00
-#define ADS_STREAM_DELAY_MS  20
-#define ADS_CH2_WORD_INDEX   3
+#define ADS_REG_CLOCK       0x03
+#define ADS_REG_GAIN1       0x04
+
+// 4000 us = 250 samples per second
+#define ADS_STREAM_PERIOD_US 4000
+
+#define ADS_CH2_WORD_INDEX  3
+#define ADS_CH3_WORD_INDEX  4
+
+// ADS131M08 PGA gain codes:
+// 0 = gain 1
+// 1 = gain 2
+// 2 = gain 4
+// 3 = gain 8
+// 4 = gain 16
+// 5 = gain 32
+// 6 = gain 64
+// 7 = gain 128
+#define ADS_PGA_GAIN_CODE_TEST 2
+#define ADS_TEST_PGA_GAIN     4
 
 static spi_device_handle_t ads_spi = NULL;
 
@@ -111,7 +131,7 @@ static void ads_spi_init(void)
     spi_device_interface_config_t devcfg = {
         .clock_speed_hz = ADS_SPI_FREQ_HZ,
         .mode = 1,
-        .spics_io_num = -1, // CS handled manually as GPIO
+        .spics_io_num = -1,
         .queue_size = 1,
         .command_bits = 0,
         .address_bits = 0,
@@ -165,6 +185,13 @@ static uint16_t ads_make_rreg_command(uint8_t reg_addr, uint8_t reg_count)
            ((reg_count - 1) & 0x7F);
 }
 
+static uint16_t ads_make_wreg_command(uint8_t reg_addr, uint8_t reg_count)
+{
+    return 0x6000 |
+           ((reg_addr & 0x3F) << 7) |
+           ((reg_count - 1) & 0x7F);
+}
+
 static uint16_t ads_read_single_register(uint8_t reg_addr)
 {
     uint8_t tx1[ADS_FRAME_BYTES] = {0};
@@ -177,48 +204,13 @@ static uint16_t ads_read_single_register(uint8_t reg_addr)
 
     ads_put_word24(tx1, 0, ((uint32_t)rreg_cmd) << 8);
 
-    ESP_LOGI(TAG, "Sending RREG command for register 0x%02X: 0x%04X", reg_addr, rreg_cmd);
-
     ads_transfer_frame(tx1, rx1);
     ads_transfer_frame(tx2, rx2);
-
-    for (int i = 0; i < ADS_FRAME_WORDS; i++) {
-    uint32_t w = ads_rx_word24(rx2, i);
-    ESP_LOGI(TAG, "RX2 word[%d] = 0x%06lX", i, (unsigned long)w);
-}
 
     uint32_t response_word24 = ads_rx_word24(rx2, 0);
     uint16_t reg_value = (response_word24 >> 8) & 0xFFFF;
 
-    ESP_LOGI(TAG, "RREG response word24 = 0x%06lX", (unsigned long)response_word24);
-    ESP_LOGI(TAG, "Register 0x%02X value = 0x%04X", reg_addr, reg_value);
-
     return reg_value;
-}
-
-static void ads_test_read_id(void)
-{
-    ESP_LOGI(TAG, "Reading ADS131M08 ID register");
-
-    uint16_t id = ads_read_single_register(ADS_REG_ID);
-
-    ESP_LOGI(TAG, "ADS ID register = 0x%04X", id);
-
-    if ((id & 0xFF00) == 0x2800) {
-        ESP_LOGI(TAG, "ADS ID looks OK: expected upper byte 0x28");
-    } else {
-        ESP_LOGW(TAG, "ADS ID unexpected. Expected something like 0x28xx.");
-    }
-}
-
-static uint16_t ads_make_wreg_command(uint8_t reg_addr, uint8_t reg_count)
-{
-    // WREG command format:
-    // 011a aaaa annn nnnn
-    // reg_count is actual count, so writing 1 register means nnn_nnnn = 0
-    return 0x6000 |
-           ((reg_addr & 0x3F) << 7) |
-           ((reg_count - 1) & 0x7F);
 }
 
 static void ads_write_single_register(uint8_t reg_addr, uint16_t value)
@@ -231,44 +223,75 @@ static void ads_write_single_register(uint8_t reg_addr, uint16_t value)
 
     uint16_t wreg_cmd = ads_make_wreg_command(reg_addr, 1);
 
-    // Command word in word 0, register data in word 1.
-    // Both are 16-bit values MSB-aligned in 24-bit ADS words.
     ads_put_word24(tx1, 0, ((uint32_t)wreg_cmd) << 8);
     ads_put_word24(tx1, 1, ((uint32_t)value) << 8);
 
-    ESP_LOGI(TAG, "Writing register 0x%02X = 0x%04X using WREG 0x%04X",
-             reg_addr, value, wreg_cmd);
-
-    // Frame 1: send WREG command + data
     ads_transfer_frame(tx1, rx1);
-
-    // Frame 2: send NULL frame, receive WREG response/ack
     ads_transfer_frame(tx2, rx2);
+}
 
-    uint32_t ack_word24 = ads_rx_word24(rx2, 0);
-    uint16_t ack = (ack_word24 >> 8) & 0xFFFF;
+static void ads_test_read_id(void)
+{
+    uint16_t id = ads_read_single_register(ADS_REG_ID);
 
-    ESP_LOGI(TAG, "WREG ack word24 = 0x%06lX", (unsigned long)ack_word24);
-    ESP_LOGI(TAG, "WREG ack = 0x%04X", ack);
+    ESP_LOGI(TAG, "ADS ID register = 0x%04X", id);
+
+    if ((id & 0xFF00) == 0x2800) {
+        ESP_LOGI(TAG, "ADS ID looks OK");
+    } else {
+        ESP_LOGW(TAG, "ADS ID unexpected. Expected something like 0x28xx.");
+    }
 }
 
 static void ads_test_write_readback_clock(void)
 {
-    ESP_LOGI(TAG, "Testing CLOCK register write/readback");
-
     uint16_t clock_before = ads_read_single_register(ADS_REG_CLOCK);
-    ESP_LOGI(TAG, "CLOCK before = 0x%04X", clock_before);
 
     ads_write_single_register(ADS_REG_CLOCK, clock_before);
 
     uint16_t clock_after = ads_read_single_register(ADS_REG_CLOCK);
-    ESP_LOGI(TAG, "CLOCK after  = 0x%04X", clock_after);
+
+    ESP_LOGI(TAG, "CLOCK before = 0x%04X, after = 0x%04X",
+             clock_before, clock_after);
 
     if (clock_after == clock_before) {
         ESP_LOGI(TAG, "CLOCK write/readback OK");
     } else {
-        ESP_LOGW(TAG, "CLOCK write/readback FAIL: before=0x%04X after=0x%04X",
-                 clock_before, clock_after);
+        ESP_LOGW(TAG, "CLOCK write/readback FAIL");
+    }
+}
+
+static void ads_configure_ch2_ch3_gain(void)
+{
+    /*
+        GAIN1 register, address 0x04:
+
+        bits 14:12 = PGAGAIN3
+        bits 10:8  = PGAGAIN2
+
+        gain 4 code = 0b010 = 2
+
+        CH3 gain 4: 2 << 12 = 0x2000
+        CH2 gain 4: 2 << 8  = 0x0200
+
+        GAIN1 = 0x2200
+    */
+
+    uint16_t gain1_value =
+        ((uint16_t)ADS_PGA_GAIN_CODE_TEST << 12) |
+        ((uint16_t)ADS_PGA_GAIN_CODE_TEST << 8);
+
+    ads_write_single_register(ADS_REG_GAIN1, gain1_value);
+
+    uint16_t gain1_after = ads_read_single_register(ADS_REG_GAIN1);
+
+    ESP_LOGI(TAG, "GAIN1 after = 0x%04X", gain1_after);
+
+    if (gain1_after == gain1_value) {
+        ESP_LOGI(TAG, "CH2/CH3 PGA gain configured to %d", ADS_TEST_PGA_GAIN);
+    } else {
+        ESP_LOGW(TAG, "GAIN1 readback mismatch: wrote=0x%04X read=0x%04X",
+                 gain1_value, gain1_after);
     }
 }
 
@@ -317,25 +340,6 @@ static bool ads_read_data_frame(uint32_t words[ADS_FRAME_WORDS])
     return true;
 }
 
-static void ads_print_ch2_ch3_once(void)
-{
-    uint32_t words[ADS_FRAME_WORDS] = {0};
-
-    if (!ads_read_data_frame(words)) {
-        return;
-    }
-
-    int32_t ch2 = ads_sign_extend_24(words[3]);
-    int32_t ch3 = ads_sign_extend_24(words[4]);
-
-    ESP_LOGI(TAG,
-             "STATUS=0x%06lX  CH2=%ld  CH3=%ld  CRC=0x%06lX",
-             (unsigned long)words[0],
-             (long)ch2,
-             (long)ch3,
-             (unsigned long)words[9]);
-}
-
 static void ads_stream_ch2_ch3_csv(void)
 {
     static uint32_t sample_index = 0;
@@ -346,11 +350,14 @@ static void ads_stream_ch2_ch3_csv(void)
         return;
     }
 
-    int32_t ch2 = ads_sign_extend_24(words[3]);  // AIN2P/AIN2N
-    int32_t ch3 = ads_sign_extend_24(words[4]);  // AIN3P/AIN3N
+    int64_t t_us = esp_timer_get_time();
 
-    printf("DATA,%lu,%ld,%ld\n",
+    int32_t ch2 = ads_sign_extend_24(words[ADS_CH2_WORD_INDEX]);
+    int32_t ch3 = ads_sign_extend_24(words[ADS_CH3_WORD_INDEX]);
+
+    printf("DATA,%lu,%lld,%ld,%ld\n",
            (unsigned long)sample_index,
+           (long long)t_us,
            (long)ch2,
            (long)ch3);
 
@@ -360,14 +367,6 @@ static void ads_stream_ch2_ch3_csv(void)
 void app_main(void)
 {
     ESP_LOGI(TAG, "Boot ok");
-    ESP_LOGI(TAG, "ADS pins:");
-    ESP_LOGI(TAG, "SYNC/RESET = GPIO%d", PIN_ADS_SYNC_RESET);
-    ESP_LOGI(TAG, "DRDY       = GPIO%d", PIN_ADS_DRDY);
-    ESP_LOGI(TAG, "CS         = GPIO%d", PIN_ADS_CS);
-    ESP_LOGI(TAG, "MOSI/DIN   = GPIO%d", PIN_ADS_DIN_MOSI);
-    ESP_LOGI(TAG, "MISO/DOUT  = GPIO%d", PIN_ADS_DOUT_MISO);
-    ESP_LOGI(TAG, "SCLK       = GPIO%d", PIN_ADS_SCLK);
-    ESP_LOGI(TAG, "CLKIN      = GPIO%d", PIN_ADS_CLKIN);
 
     configure_basic_pins();
 
@@ -377,38 +376,27 @@ void app_main(void)
     ads_spi_init();
 
     ads_reset_pulse();
+
     ads_test_read_id();
     ads_test_write_readback_clock();
 
- ESP_LOGI(TAG, "Starting CH2/CH3 CSV stream");
-printf("HEADER,sample,ch2_raw,ch3_raw\n");
+    ads_configure_ch2_ch3_gain();
 
-while (1) {
-    ads_stream_ch2_ch3_csv();
-    vTaskDelay(pdMS_TO_TICKS(ADS_STREAM_DELAY_MS));
-}
+    ESP_LOGI(TAG, "Startup checks done. CSV stream starts in 5 seconds.");
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    ESP_LOGI(TAG, "Starting CH2/CH3 CSV stream");
+    printf("HEADER,sample,t_us,ch2_raw,ch3_raw\n");
 
-}
-/*void app_main(void)
-{
-    ESP_LOGI(TAG, "GPIO10 manual toggle test");
-
-    gpio_config_t test_conf = {
-        .pin_bit_mask = (1ULL << PIN_ADS_DIN_MOSI),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ESP_ERROR_CHECK(gpio_config(&test_conf));
+    int64_t next_sample_time_us = esp_timer_get_time();
 
     while (1) {
-        gpio_set_level(PIN_ADS_DIN_MOSI, 1);
-        vTaskDelay(pdMS_TO_TICKS(500));
+        int64_t now_us = esp_timer_get_time();
 
-        gpio_set_level(PIN_ADS_DIN_MOSI, 0);
-        vTaskDelay(pdMS_TO_TICKS(500));
-
-        ESP_LOGI(TAG, "GPIO10 toggled");
+        if (now_us >= next_sample_time_us) {
+            ads_stream_ch2_ch3_csv();
+            next_sample_time_us += ADS_STREAM_PERIOD_US;
+        } else {
+            esp_rom_delay_us(100);
+        }
     }
-}*/
+}
