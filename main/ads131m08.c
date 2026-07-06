@@ -231,21 +231,17 @@ bool ads_read_data_frame(uint32_t words[])
     return true;
 }
 
-void ads_stream_ch2_ch3_csv(void)
+bool ads_read_channels(int32_t *ch2, int32_t *ch3)
 {
-    static uint32_t sample_index = 0;
-
     uint32_t words[ADS_FRAME_WORDS];
 
-    if (!ads_read_data_frame(words)) {
-        return;
+    if (!ads_read_data_frame(words))
+    {
+        return false;
     }
 
-    int64_t t = esp_timer_get_time();
+    *ch2 = ads_sign_extend_24(words[ADS_CH2_WORD_INDEX]);
+    *ch3 = ads_sign_extend_24(words[ADS_CH3_WORD_INDEX]);
 
-    int32_t ch2 = ads_sign_extend_24(words[ADS_CH2_WORD_INDEX]);
-    int32_t ch3 = ads_sign_extend_24(words[ADS_CH3_WORD_INDEX]);
-
-    printf("DATA,%lu,%lld,%ld,%ld\n",
-           sample_index++, t, ch2, ch3);
+    return true;
 }
