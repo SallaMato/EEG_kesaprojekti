@@ -23,6 +23,7 @@ static const char *TAG = "BLE_EEG";
 
 #define EEG_SERVICE_UUID      0xFFF0
 #define EEG_CHARACTERISTIC_UUID 0xFFF1
+#define BATCH_SIZE 5
 
 
 // ======================================================
@@ -269,8 +270,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 // Send EEG sample
 // ======================================================
 
-void ble_send_sample(int32_t ch2,
-                     int32_t ch3)
+void ble_send_sample(int32_t ch2, int32_t ch3)
 {
     static uint32_t counter = 0;
 
@@ -287,35 +287,50 @@ void ble_send_sample(int32_t ch2,
     if (!g_notifications_enabled)
         return;
 
-    static eeg_packet_t packet;
-
+    // --- UUSI PUSKUROINTILOGIIKKA ALKAA ---
+    static eeg_packet_t batch_buffer[BATCH_SIZE];
+    static int batch_idx = 0;
     static uint32_t sample_counter = 0;
 
-    packet.sample = sample_counter++;
-
-    packet.ch[0] = ch2;
-    packet.ch[1] = ch3;
-
-    for (int i = 2; i < 8; i++)
-        packet.ch[i] = 0;
-
-    struct os_mbuf *om =
-        ble_hs_mbuf_from_flat(
-            &packet,
-            sizeof(packet));
-
-    if (om == NULL)
-        return;
-
-    int rc = ble_gatts_notify_custom(
-                g_conn_handle,
-                g_char_handle,
-                om);
-
-    if (rc != 0)
-    {
-        ESP_LOGW(TAG,
-                 "notify failed rc=%d",
-                 rc);
+    // Täytetään puskurista seuraava vapaa paikka
+    batch_buffer[batch_idx].sample = sample_counter++;
+    batch_buffer[batch_idx].ch[0] = ch2;
+    batch_buffer[batch_idx].ch[1] = ch3;
+    
+    // Nollataan loput kanavat (koodisi on valmis 8 kanavalle)
+    for (int i = 2; i < 8; i++) {
+        batch_buffer[batch_idx].ch[i] = 0;
     }
+    
+    batch_idx++;
+
+    // Lähetetään vasta, kun puskuri on täynnä (esim. joka 5. näyte)
+    if (batch_idx >= BATCH_SIZE) 
+    {
+        struct os_mbuf *om =
+            ble_hs_mbuf_from_flat(
+                batch_buffer,
+                sizeof(batch_buffer)); // Lähetetään koko 5 näytteen taulukko (180 tavua)
+
+        if (om == NULL) {
+            batch_idx = 0; // Nollaus varmuuden vuoksi
+            return;
+        }
+
+        int rc = ble_gatts_notify_custom(
+                    g_conn_handle,
+                    g_char_handle,
+                    om);
+
+        if (rc != 0)
+        {
+            ESP_LOGW(TAG,
+                     "notify failed rc=%d",
+                     rc);
+        }
+
+        // Tyhjennetään puskuri-indeksi seuraavaa erää varten
+        batch_idx = 0;
+    }
+    // --- UUSI PUSKUROINTILOGIIKKA PÄÄTTYY ---
 }

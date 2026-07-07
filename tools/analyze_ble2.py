@@ -54,7 +54,7 @@ sample_buffer = deque(maxlen=BUFFER_SIZE)
 ch2_buffer = deque(maxlen=BUFFER_SIZE)
 ch3_buffer = deque(maxlen=BUFFER_SIZE)
 
-
+arrival_times = deque(maxlen=BUFFER_SIZE)
 
 # ==========================================================
 # Statistics
@@ -84,39 +84,35 @@ def notification_handler(sender, data):
     global received_packets
     global bad_packets
 
-    #
-    # ESP lähettää:
-    #
-    # uint32 sample
-    # int32 ch[8]
-    #
-    # = 36 tavua
-    #
-
-    if len(data) != 36:
+    # Yksi näyte on 36 tavua. Koska ESP lähettää useamman näytteen putkeen,
+    # datan pituuden pitää olla jaollinen 36:lla.
+    if len(data) % 36 != 0:
         bad_packets += 1
         return
 
-    try:
+    # Käydään data läpi 36 tavun pätkissä
+    for offset in range(0, len(data), 36):
+        single_sample_bytes = data[offset : offset + 36]
+        
+        try:
+            packet = struct.unpack("<I8i", single_sample_bytes)
 
-        packet = struct.unpack("<I8i", data)
+            sample = packet[0]
+            ch2_raw = packet[1]
+            ch3_raw = packet[2]
 
-        sample = packet[0]
+            # Tallennetaan näytteet ja reaaliaika puskureihin
+            sample_buffer.append(sample)
+            arrival_times.append(time.time()) 
+            
+            ch2_buffer.append(raw_to_uv(ch2_raw))
+            ch3_buffer.append(raw_to_uv(ch3_raw))
 
-        ch2_raw = packet[1]
-        ch3_raw = packet[2]
+            received_packets += 1
 
-    except struct.error:
-
-        bad_packets += 1
-        return
-
-    sample_buffer.append(sample)
-
-    ch2_buffer.append(raw_to_uv(ch2_raw))
-    ch3_buffer.append(raw_to_uv(ch3_raw))
-
-    received_packets += 1
+        except struct.error:
+            bad_packets += 1
+            return
 
     if received_packets % 250 == 0:
         print("Packets received:", received_packets)
@@ -158,7 +154,8 @@ def peak_to_peak(x):
 
     x = np.asarray(x)
 
-    return np.max(x) - np.min(x)
+    return np.max(x) - np.min(x)   
+
 
 def fft_analysis(values, sps):
 
@@ -209,17 +206,13 @@ def amplitude_at(values, sps, target_freq):
 
     return mag[idx] * 2.0
 
-def estimate_sps(samples):
-
-    if len(samples) < 2:
+def estimate_sps(times):
+    if len(times) < 2:
         return EXPECTED_SPS
-
-    ds = samples[-1] - samples[0]
-
-    if ds <= 0:
+    duration = times[-1] - times[0]
+    if duration <= 0:
         return EXPECTED_SPS
-
-    return ds / (len(samples) - 1) * EXPECTED_SPS
+    return (len(times) - 1) / duration
 
 # ==========================================================
 # Plot
@@ -294,10 +287,25 @@ def print_statistics():
 
     last_print = now
 
-    sps = estimate_sps(sample_buffer)
+    sps = estimate_sps(arrival_times)
 
     ch2 = np.asarray(ch2_buffer)
     ch3 = np.asarray(ch3_buffer)
+
+    print(
+    "DEBUG:",
+    ch2[0],
+    ch2[1],
+    ch2[2],
+    ch2[3],
+    ch2[4]
+    )
+
+    print(
+        "MIN MAX:",
+        np.min(ch2),
+        np.max(ch2)
+    )
 
     #
     # CH2
